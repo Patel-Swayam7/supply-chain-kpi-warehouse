@@ -1,18 +1,17 @@
-# Supply Chain KPI Warehouse (MySQL + Python)
+# Job Market Data Warehouse & Analytics (MySQL)
 
-A supply chain analytics warehouse that turns 40,000 order lines and 23,400 inventory snapshots into the four KPIs operations teams run on: **OTIF, fill rate, backlog and inventory turns**. The KPIs are defined once in reusable SQL views and delivered as an **automated weekly Excel report** generated in about 2 seconds.
+An end-to-end SQL data engineering project: **4 raw CSV files (1.6M job postings) → staging → star schema data warehouse → 3 data marts → analysis** of the most in-demand, highest-paying, and most "optimal" skills for data engineers.
 
-The business: a simulated industrial distributor shipping 60 SKUs (electrical components, power supplies, sensors, cables, control panels) from **5 distribution centers** to **150 customers**, January 2025 to June 2026.
+Built in **MySQL** by following and adapting the DuckDB-based projects from [Luke Barousse's *SQL for Data Engineering* course](https://github.com/lukebarousse/SQL_Data_Engineering_Course) (Project 1: EDA, Project 2: Warehouse & Mart Build), combined here into a single pipeline. All SQL was translated from DuckDB to MySQL, which required redesigning several pieces (see [MySQL Engineering Notes](#mysql-engineering-notes)).
 
 ---
 
 ## Table of Contents
 - [Architecture](#architecture)
-- [Data Model](#data-model)
-- [KPI Definitions](#kpi-definitions)
-- [Results](#results)
-- [Automated Weekly Report](#automated-weekly-report)
-- [Engineering Decisions](#engineering-decisions)
+- [Dataset](#dataset)
+- [Pipeline Steps](#pipeline-steps)
+- [Analysis & Findings](#analysis--findings)
+- [MySQL Engineering Notes](#mysql-engineering-notes)
 - [How to Run](#how-to-run)
 - [Project Structure](#project-structure)
 - [What I Learned](#what-i-learned)
@@ -23,244 +22,226 @@ The business: a simulated industrial distributor shipping 60 SKUs (electrical co
 
 ```mermaid
 flowchart LR
-    A["Python data generator<br/>(seeded, reproducible)"] -->|5 raw CSVs| B["Staging tables<br/>stg_* (all TEXT)"]
-    B -->|cast + date keys| C[("supply_chain<br/>star schema")]
-    C --> D["KPI views<br/>OTIF, fill rate,<br/>backlog, inventory turns"]
-    D --> E["Analysis queries<br/>CTEs + window functions"]
-    D --> F["Python report<br/>6 tab Excel workbook"]
-    E --> F
+    A[("4 raw CSVs<br/>~370 MB")] -->|LOAD DATA| B["Staging tables<br/>stg_* (all TEXT)"]
+    B -->|clean + type-cast| C[("job_market<br/>star schema<br/>data warehouse")]
+    C --> D["flat_mart<br/>denormalized, 1 row per job"]
+    C --> E["skills_mart<br/>monthly skill demand"]
+    C --> F["priority_mart<br/>snapshot + incremental upsert"]
+    E --> G["Analysis 1<br/>in-demand skills"]
+    C --> H["Analysis 2 & 3<br/>top-paying & optimal skills"]
 ```
 
----
-
-## Data Model
-
-A star schema with **2 fact tables** and **4 shared dimensions**.
+### Star schema (warehouse)
 
 ```mermaid
 erDiagram
-    dim_date ||--o{ fact_order_lines : "order / promised / ship / delivery date"
-    dim_product ||--o{ fact_order_lines : product_key
-    dim_customer ||--o{ fact_order_lines : customer_key
-    dim_warehouse ||--o{ fact_order_lines : warehouse_key
-    dim_date ||--o{ fact_inventory_snapshot : snapshot_date_key
-    dim_product ||--o{ fact_inventory_snapshot : product_key
-    dim_warehouse ||--o{ fact_inventory_snapshot : warehouse_key
+    company_dim ||--o{ job_postings_fact : "company_id"
+    job_postings_fact ||--o{ skills_job_dim : "job_id"
+    skills_dim ||--o{ skills_job_dim : "skill_id"
 
-    fact_order_lines {
-        int order_line_id PK
-        int order_date_key FK
-        int promised_date_key FK
-        int ship_date_key FK
-        int delivery_date_key FK
-        int ordered_qty
-        int shipped_qty
-        decimal unit_price
-        decimal unit_cost
+    job_postings_fact {
+        int job_id PK
+        int company_id FK
+        text job_title_short
+        datetime job_posted_date
+        boolean job_work_from_home
+        double salary_year_avg
     }
-    fact_inventory_snapshot {
-        int snapshot_date_key PK
-        int product_key PK
-        int warehouse_key PK
-        int on_hand_qty
-        decimal unit_cost
+    company_dim {
+        int company_id PK
+        text name
+    }
+    skills_dim {
+        int skill_id PK
+        text skills
+        text type
+    }
+    skills_job_dim {
+        int job_id PK, FK
+        int skill_id PK, FK
     }
 ```
 
-| Table | Grain | Rows |
+---
+
+## Dataset
+
+Real-world data job postings collected by Luke Barousse and provided with the course as 4 CSV files:
+
+| Table | Type | Rows loaded |
 |---|---|---:|
-| `fact_order_lines` | one order line | 40,000 |
-| `fact_inventory_snapshot` | product × warehouse × week | 23,400 |
-| `dim_date` | one calendar day (built with a recursive CTE) | 761 |
-| `dim_product` | one SKU | 60 |
-| `dim_customer` | one customer | 150 |
-| `dim_warehouse` | one distribution center | 5 |
-
-`fact_order_lines` is a role-playing fact: it joins to `dim_date` four times (order, promised, ship, delivery date).
+| `job_postings_fact` | Fact | 1,615,930 |
+| `company_dim` | Dimension | 215,940 |
+| `skills_dim` | Dimension | 262 |
+| `skills_job_dim` | Bridge (many-to-many) | 7,193,426 |
 
 ---
 
-## KPI Definitions
+## Pipeline Steps
 
-All KPIs live in `02_kpi_views/01_create_kpi_views.sql`, so the analysis queries, the Excel report and any future dashboard use the same definition.
-
-| KPI | View | Definition |
+| Step | Script | What it does |
 |---|---|---|
-| **OTIF** | `vw_otif_weekly` | Due order lines delivered on or before the promised date **and** shipped in full ÷ all due lines |
-| **Fill rate** | `vw_fill_rate_weekly` | Unit fill rate = units shipped ÷ units ordered. Line fill rate = lines shipped complete ÷ lines ordered |
-| **Backlog** | `vw_backlog_weekly` | Order lines received but not shipped at each week end (Sunday), in lines, units and $ value, with a past-due split |
-| **Inventory turns** | `vw_inventory_turns_monthly` | (Monthly COGS × 12) ÷ average inventory value from that month's weekly snapshots, plus days of supply |
+| 1 | `01_warehouse/01_create_tables.sql` | Creates the `job_market` database and the star schema (fact, 2 dimensions, bridge) with primary and foreign keys. Idempotent: safe to re-run. |
+| 2 | `01_warehouse/02_load_data.sql` | Loads each CSV into an all-text **staging** table, then cleans and type-casts into the warehouse (dimensions → fact → bridge, in foreign-key order). Ends with row-count reconciliation and referential-integrity checks. |
+| 3 | `02_marts/03_create_flat_mart.sql` | **Flat mart:** one wide row per job posting (1,615,930 rows) with company name and all skills packed into a JSON array, so analysts need no joins. |
+| 4 | `02_marts/04_create_skills_mart.sql` | **Skills mart:** a dimensional mart (`dim_skill`, `dim_date_month`, `fact_skill_demand_monthly`) rolling 7.2M skill-job links up to 52,520 monthly rows of additive counts. |
+| 5 | `02_marts/05_create_priority_mart.sql` | **Priority mart:** a snapshot of jobs for priority roles, each stamped with a priority level and `updated_at`. |
+| 6 | `02_marts/06_update_priority_mart.sql` | **Incremental update (upsert):** applies a business-rule change by updating only changed jobs, inserting new ones and deleting removed ones, in a single transaction (906,525 jobs after the update). |
+| ▶ | `build_all.sh` | Runs steps 1–6 in order with one command. |
 
-Each view stores **additive counts and sums** next to the ratio, so totals roll up correctly (`SUM(lines_otif) / SUM(lines_due)`), never as an average of weekly percentages.
+### Data quality checks built into the load
+- **Reconciliation:** staging row count vs. warehouse row count per table
+- **Referential integrity:** orphaned `company_id`, `skill_id` and `job_id` checks (all 0)
+- **Safe typing:** blanks → `NULL`, `True`/`False` → boolean, Windows line endings stripped
 
 ---
 
-## Results
+## Analysis & Findings
 
-### Network KPIs (Jan 2025 to Jun 2026, complete weeks)
-| KPI | Value |
+All three questions focus on **remote Data Engineer** roles. My MySQL results match the course's DuckDB results (query 1 and 2 exactly; query 3 within ±0.01 from rounding), which validates the translated pipeline end to end.
+
+### 1. What are the most in-demand skills for data engineers?
+[`03_analysis/01_top_demanded_skills.sql`](03_analysis/01_top_demanded_skills.sql): built on the **skills mart**, so it needs no joins against the 7M-row bridge table.
+
+| Skill | Remote DE postings |
 |---|---:|
-| OTIF | 77.1% |
-| On time | 83.6% |
-| In full | 91.9% |
-| Unit fill rate | 96.5% |
-| Inventory turns (annualized, May 2026) | 9.1 |
+| sql | 29,221 |
+| python | 28,776 |
+| aws | 17,823 |
+| azure | 14,143 |
+| spark | 12,799 |
+| airflow | 9,996 |
+| snowflake | 8,639 |
+| databricks | 8,183 |
+| java | 7,267 |
+| gcp | 6,446 |
 
-### 1. OTIF trend ([`01_otif_trend.sql`](03_analysis/01_otif_trend.sql))
-Weekly OTIF with a 4-week rolling rate (window over rolling sums) and week-over-week change with `LAG()`.
+**Takeaways**
+- **SQL and Python** are the foundation: each appears in ~29K postings, roughly 1.6× the next skill.
+- **Cloud** comes next: AWS (~17.8K) and Azure (~14.1K), with GCP in the top 10.
+- **Big data and pipeline tools** (Spark, Airflow, Snowflake, Databricks) round out the list.
 
-| Week start | Lines due | OTIF | 4 wk rolling | WoW change |
-|---|---:|---:|---:|---:|
-| 2026-06-22 | 620 | 70.8% | 74.7% | −5.6 pts |
-| 2026-06-15 | 641 | 76.4% | 75.7% | +3.2 pts |
-| 2026-06-08 | 595 | 73.3% | 75.1% | −5.1 pts |
-| 2026-06-01 | 579 | 78.4% | 74.9% | +3.8 pts |
-| 2026-05-25 | 607 | 74.6% | 74.8% | +0.4 pts |
+### 2. What are the highest-paying skills for data engineers?
+[`03_analysis/02_top_paying_skills.sql`](03_analysis/02_top_paying_skills.sql): median salary for skills with at least 100 remote DE postings (top 10 of 25 shown).
 
-**Takeaway:** the rolling rate has settled around 75%, below the 77.1% full-period average, driven by a build-up of supplier backorders since April.
+| Skill | Median salary | Postings |
+|---|---:|---:|
+| rust | $210,000 | 232 |
+| golang | $184,000 | 912 |
+| terraform | $184,000 | 3,248 |
+| spring | $175,500 | 364 |
+| neo4j | $170,000 | 277 |
+| gdpr | $169,616 | 582 |
+| zoom | $168,438 | 127 |
+| graphql | $167,500 | 445 |
+| mongo | $162,250 | 265 |
+| fastapi | $157,500 | 204 |
 
-### 2. Warehouse scorecard ([`02_warehouse_scorecard.sql`](03_analysis/02_warehouse_scorecard.sql))
-Last 13 weeks vs the 13 weeks before, ranked with `RANK()`.
+**Takeaways**
+- **Rust** tops the list at $210K but is relatively niche (232 postings).
+- **Terraform** combines a top salary ($184K) with real demand (3,248 postings).
+- Core pipeline tools still pay well at high volume: **Kubernetes** $150.5K (4,202 postings), **Airflow** $150K (9,996 postings).
 
-| OTIF rank | Warehouse | OTIF (last 13 wk) | OTIF (prior 13 wk) | Change | Unit fill rate | Turns |
-|---:|---|---:|---:|---:|---:|---:|
-| 1 | DC Atlanta | 80.1% | 82.5% | −2.5 pts | 94.6% | 9.1 |
-| 2 | DC Dallas | 78.7% | 83.2% | −4.5 pts | 94.5% | 9.9 |
-| 3 | DC Chicago | 78.7% | 80.4% | −1.7 pts | 95.0% | 9.1 |
-| 4 | DC Newark | 70.9% | 74.1% | −3.2 pts | 93.6% | 8.2 |
-| 5 | DC Los Angeles | 68.4% | 71.9% | −3.5 pts | 95.5% | 9.3 |
+### 3. What are the most optimal skills (high demand and high pay)?
+[`03_analysis/03_optimal_skills.sql`](03_analysis/03_optimal_skills.sql): `optimal_score = LN(demand) × median salary / 1,000,000`, using remote DE postings with a listed salary (top 10 of 25 shown).
 
-**Takeaway:** Los Angeles and Newark trail the top three DCs by 8 to 12 points of OTIF. LA's fill rate is the best in the network, so its gap is **lateness, not stock**: the fix is in warehouse processing, not inventory.
+| Skill | Median salary | Demand | Optimal score |
+|---|---:|---:|---:|
+| terraform | $184,000 | 193 | 0.97 |
+| python | $135,000 | 1,133 | 0.95 |
+| aws | $137,320 | 783 | 0.91 |
+| sql | $130,000 | 1,128 | 0.91 |
+| airflow | $150,000 | 386 | 0.89 |
+| spark | $140,000 | 503 | 0.87 |
+| kafka | $145,000 | 292 | 0.82 |
+| snowflake | $135,500 | 438 | 0.82 |
+| azure | $128,000 | 475 | 0.79 |
+| java | $135,000 | 303 | 0.77 |
 
-### 3. Problem SKUs ([`03_problem_skus.sql`](03_analysis/03_problem_skus.sql))
-Shortfall per SKU with `SUM() OVER ()` share, running cumulative share, and `DENSE_RANK()` within category.
-
-| SKU | Product | Category | Units short | Fill rate | Share of shortfall | Cumulative |
-|---|---|---|---:|---:|---:|---:|
-| POW-0020 | Power Module | Power Supplies | 484 | 94.2% | 10.4% | 10.4% |
-| POW-0024 | Buffer Module | Power Supplies | 407 | 93.2% | 8.7% | 19.1% |
-| POW-0016 | Battery Pack | Power Supplies | 374 | 93.4% | 8.0% | 27.1% |
-| POW-0022 | Voltage Regulator | Power Supplies | 345 | 92.3% | 7.4% | 34.5% |
-| SEN-0026 | Temperature Sensor | Sensors | 284 | 94.8% | 6.1% | 40.6% |
-
-**Takeaway:** 5 of 60 SKUs cause 40.6% of all units shorted, and 4 of them are power supplies. Safety stock and supplier follow-up on that one category gives the biggest fill rate win.
-
-### 4. Backlog aging ([`04_backlog_aging.sql`](03_analysis/04_backlog_aging.sql))
-
-| Age since order | Open lines | Open value | Share of value | Past due lines |
-|---|---:|---:|---:|---:|
-| 0 to 7 days | 159 | $147,968 | 50.8% | 5 |
-| 8 to 14 days | 30 | $26,172 | 9.0% | 25 |
-| 15 to 30 days | 33 | $19,926 | 6.8% | 33 |
-| 30+ days | 120 | $96,984 | 33.3% | 120 |
-
-**Takeaway:** half the backlog is normal new orders, but a third of its value has been open for more than 30 days and is entirely past due. Those 120 lines are the escalation list.
-
----
-
-## Automated Weekly Report
-
-`04_reporting/weekly_kpi_report.py` connects to MySQL, runs the KPI views and the **same `.sql` files** in `03_analysis/` (so the report and the SQL never drift apart), and writes a formatted workbook to `reports/`:
-
-| Tab | Contents |
-|---|---|
-| Summary | Each KPI this week vs last week vs 13-week average, with improvements in green and declines in red |
-| OTIF Trend | 13 weeks of OTIF, on time, in full and fill rate, plus a line chart |
-| Warehouse Scorecard | DC ranking (query 2) |
-| Problem SKUs | Top shortfall SKUs (query 3) |
-| Backlog Aging | Open orders by age (query 4) |
-| Inventory Turns | Last 6 months of turns by DC |
-
-```
-Report week: 2026-06-22
-Saved: reports/weekly_kpi_report_2026-06-22.xlsx
-Tabs: Summary, OTIF Trend, Warehouse Scorecard, Problem SKUs, Backlog Aging, Inventory Turns
-Generated in 2.2 seconds
-```
-
-It can be scheduled to run every Monday with cron, for example: `0 7 * * 1 cd /path/to/repo && .venv/bin/python 04_reporting/weekly_kpi_report.py`
+**Takeaways**
+- **Python, SQL and AWS** are the safest bets: highest demand with solid salaries.
+- **Terraform and Airflow** score highly thanks to premium pay, signaling the value of infrastructure and orchestration skills.
+- The natural log keeps very common skills from drowning out salary, so the ranking rewards skills that are *both* well paid and widely requested.
 
 ---
 
-## Engineering Decisions
+## MySQL Engineering Notes
 
-| Decision | Why |
-|---|---|
-| **Seeded data generator with built-in realism** | Each DC has its own speed and reliability, some categories stock out more, and recent supplier backorders pile up. The KPIs have real patterns to find, and anyone who runs the generator gets identical data. |
-| **ELT with all-text staging tables** | CSVs land as text, then cast into typed tables, with staged vs loaded row reconciliation and 5 business-rule checks (for example, shipped never exceeds ordered). |
-| **Integer date keys + a generated `dim_date`** | The standard warehouse pattern: fast joins and easy grouping by week, month or quarter. Built with a recursive CTE, so no calendar file is needed. |
-| **Separate inventory snapshot fact** | Inventory is a point-in-time balance, not a transaction, so it gets its own fact table at weekly grain. That's what makes inventory turns possible. |
-| **Complete weeks only** | The last partial week is excluded from weekly rates so a 2-day week can't look like a collapse. |
-| **KPI logic in views, report in Python** | SQL owns the definitions, and Python only formats. Changing a KPI means editing one view. |
+The course uses DuckDB. Translating to MySQL required these design changes:
 
-**Validation:** network OTIF (77.1%) and unit fill rate (96.5%) were cross-checked against an independent pandas calculation on the raw CSVs, and matched.
+| Challenge | DuckDB (course) | My MySQL solution |
+|---|---|---|
+| Loading CSVs | `read_csv()` with auto-detect | `LOAD DATA LOCAL INFILE` into **all-text staging tables**, then a cleaning `INSERT … SELECT`. Bad values get handled in SQL instead of crashing the load, and row counts can be reconciled. |
+| Real-world data lengths | `VARCHAR` (unbounded) | The first load failed on row 136,576 (a company name longer than 512 characters), so I switched text fields to `TEXT`. |
+| CSV column order | Matched by header name | Verified each file's header (`skills_job_dim.csv` is `job_id, skill_id`, not the table's column order) and mapped columns explicitly. |
+| Schemas | `CREATE SCHEMA flat_mart` | Each mart is its own MySQL database reading from `job_market` (MySQL treats schemas and databases as the same thing). |
+| Nested data | `ARRAY_AGG(STRUCT_PACK(...))` | `JSON_ARRAYAGG(JSON_OBJECT(...))` into a `JSON` column, with an empty array for jobs without skills. |
+| Upserts | `MERGE INTO … WHEN MATCHED / NOT MATCHED / NOT MATCHED BY SOURCE` | `INSERT … ON DUPLICATE KEY UPDATE` (refreshes `updated_at` only when the priority actually changes) plus `DELETE … LEFT JOIN`, wrapped in a **transaction**. |
+| Median | `MEDIAN()` | No built-in, so I calculated it with **window functions**: `ROW_NUMBER()` and `COUNT() OVER (PARTITION BY skill)`, keeping the middle row(s). |
+| Dates | `DATE_TRUNC('month', d)` | `CAST(DATE_FORMAT(d, '%Y-%m-01') AS DATE)`, `QUARTER()`, `CONCAT()` |
 
 ---
 
 ## How to Run
 
-**Requirements:** MySQL 8+, Python 3.9+
+**Requirements:** MySQL 8+ and a terminal (macOS/Linux).
 
 ```bash
-# 1. Clone and set up Python
+# 1. Clone the repo
 git clone <this-repo-url>
-cd supply-chain-kpi-warehouse
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+cd job-market-data-warehouse
 
-# 2. Generate the data and build the warehouse + KPI views (one command)
+# 2. Download the raw data (not stored in the repo, ~370 MB)
+mkdir -p data
+for f in company_dim skills_dim job_postings_fact skills_job_dim; do
+  curl -o data/$f.csv https://storage.googleapis.com/sql_de/$f.csv
+done
+
+# 3. Allow local file loading, then build everything (about 10–20 minutes)
 mysql -u root -e "SET GLOBAL local_infile = 1;"
 bash build_all.sh
 
 # 4. Run the analysis
-mysql -u root -t < 03_analysis/01_otif_trend.sql
-mysql -u root -t < 03_analysis/02_warehouse_scorecard.sql
-mysql -u root -t < 03_analysis/03_problem_skus.sql
-mysql -u root -t < 03_analysis/04_backlog_aging.sql
-
-# 5. Generate the weekly Excel report
-python3 04_reporting/weekly_kpi_report.py
+mysql -u root -t < 03_analysis/01_top_demanded_skills.sql
+mysql -u root -t < 03_analysis/02_top_paying_skills.sql
+mysql -u root -t < 03_analysis/03_optimal_skills.sql
 ```
-
-The report script reads connection settings from `~/.my.cnf` if present, or from the environment variables `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER` and `MYSQL_PASSWORD`.
 
 ---
 
 ## Project Structure
 
 ```
-supply-chain-kpi-warehouse/
+job-market-data-warehouse/
 ├── README.md
-├── requirements.txt
-├── build_all.sh                          # data + warehouse + views in one command
-├── 00_generate_data/
-│   └── generate_data.py                  # seeded, realistic simulated data
+├── build_all.sh                      # runs the full pipeline
 ├── 01_warehouse/
-│   ├── 01_create_tables.sql              # star schema + dim_date via recursive CTE
-│   └── 02_load_data.sql                  # CSV -> staging -> warehouse + DQ checks
-├── 02_kpi_views/
-│   └── 01_create_kpi_views.sql           # OTIF, fill rate, backlog, inventory turns
+│   ├── 01_create_tables.sql          # star schema DDL
+│   └── 02_load_data.sql              # CSV -> staging -> warehouse + DQ checks
+├── 02_marts/
+│   ├── 03_create_flat_mart.sql
+│   ├── 04_create_skills_mart.sql
+│   ├── 05_create_priority_mart.sql
+│   └── 06_update_priority_mart.sql   # incremental upsert
 ├── 03_analysis/
-│   ├── 01_otif_trend.sql
-│   ├── 02_warehouse_scorecard.sql
-│   ├── 03_problem_skus.sql
-│   └── 04_backlog_aging.sql
-├── 04_reporting/
-│   └── weekly_kpi_report.py              # automated Excel report
-├── data/                                 # generated CSVs (git-ignored)
-└── reports/                              # generated reports (git-ignored)
+│   ├── 01_top_demanded_skills.sql
+│   ├── 02_top_paying_skills.sql
+│   └── 03_optimal_skills.sql
+└── data/                             # raw CSVs (git-ignored)
 ```
 
 ---
 
 ## What I Learned
 
-- **Supply chain KPIs as precise definitions:** what counts as "due", why OTIF and fill rate tell different stories, and why backlog needs aging.
-- **Dimensional modeling:** transaction facts vs snapshot facts, role-playing date dimensions, and choosing the grain.
-- **SQL for analytics:** views, CTEs, recursive CTEs, window functions (`LAG`, `RANK`, `DENSE_RANK`, rolling and cumulative `SUM() OVER`), and conditional aggregation.
-- **Reporting automation:** Python + pandas + openpyxl to turn SQL output into a stakeholder-ready workbook in seconds.
+- **Dimensional modeling:** designing fact, dimension and bridge tables, and choosing a mart's *grain* so its measures stay additive.
+- **ELT with a staging layer:** landing raw data first, then cleaning and typing in SQL, with reconciliation and referential-integrity checks.
+- **Incremental loads:** upserting changes instead of full rebuilds, kept consistent with transactions.
+- **Advanced SQL:** CTEs, window functions (a hand-built median), JSON aggregation, `CASE`, set operations.
+- **Debugging real data:** handling oversized values, column-order mismatches, and engine differences between DuckDB and MySQL.
 
 ---
 
-*Data is simulated for portfolio purposes. Company, customer and product names are fictional.*
+## Credits
+
+Dataset and original project design: [Luke Barousse — SQL for Data Engineering](https://github.com/lukebarousse/SQL_Data_Engineering_Course). MySQL translation, staging-layer design, the upsert/median rewrites and the combined pipeline are my own adaptation.
