@@ -209,12 +209,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Generate the data (5 CSVs into data/)
-python3 00_generate_data/generate_data.py
-
-# 3. Build the warehouse and KPI views
+# 2. Generate the data and build the warehouse + KPI views (one command)
 mysql -u root -e "SET GLOBAL local_infile = 1;"
-mysql --local-infile=1 -u root < build_all.sql
+bash build_all.sh
 
 # 4. Run the analysis
 mysql -u root -t < 03_analysis/01_otif_trend.sql
@@ -236,7 +233,7 @@ The report script reads connection settings from `~/.my.cnf` if present, or from
 supply-chain-kpi-warehouse/
 ├── README.md
 ├── requirements.txt
-├── build_all.sql                         # warehouse + views in one command
+├── build_all.sh                          # data + warehouse + views in one command
 ├── 00_generate_data/
 │   └── generate_data.py                  # seeded, realistic simulated data
 ├── 01_warehouse/
