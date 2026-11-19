@@ -2,10 +2,8 @@
 Question: Which products cause the most short shipments?
 - Units ordered but not shipped (shortfall) per SKU, last 13 weeks
 - Each SKU's share of the network's total shortfall (SUM() OVER ())
-- Running cumulative share, to see how few SKUs drive most of the problem
+- Running cumulative share
 - DENSE_RANK() of each SKU within its category
-Why: Fill rate problems are usually concentrated in a handful of SKUs.
-Fixing those first (safety stock, supplier follow-up) gives the biggest win.
 */
 
 USE supply_chain;

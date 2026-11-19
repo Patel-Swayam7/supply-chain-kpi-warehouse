@@ -1,16 +1,16 @@
 """
 Step 0: Generate the simulated supply chain dataset (raw CSVs).
 
-Creates realistic order line and inventory data for a distributor shipping
+Creates order line and inventory data for a distributor shipping
 60 SKUs from 5 distribution centers to 150 customers, Jan 2025 to Jun 2026.
 
-Realism built in on purpose, so the KPIs have something to measure:
+Patterns in the data:
   - each warehouse has its own processing speed and reliability
   - some categories stock out more often, causing partial shipments
   - a small share of lines are late, partially shipped, or still open (backlog)
   - inventory levels follow a weekly random walk sized to each SKU's demand
 
-Fixed random seed: everyone who runs this gets the exact same data.
+Uses a fixed random seed, so every run produces the same files.
 
 Usage (from the project root):
     python3 00_generate_data/generate_data.py
@@ -113,7 +113,7 @@ line_id = 1
 order_id = 100000
 while line_id <= N_ORDER_LINES:
     order_id += 1
-    # Orders get a little busier over time (business growth)
+    # Order volume grows over time
     d = START + timedelta(days=int(days_span * (random.random() ** 0.85)))
     if d.weekday() >= 5:                      # no orders on weekends
         d -= timedelta(days=d.weekday() - 4)
@@ -145,17 +145,17 @@ while line_id <= N_ORDER_LINES:
         if random.random() < stockout_prob[cat]:
             shipped = int(ordered * random.uniform(0.3, 0.9))
 
-        # Recent orders, and a few stuck backorders, are still open
+        # Recent orders and a few backorders are still open
         status = "Delivered"
         ship_s, deliv_s = ship.isoformat(), delivery.isoformat()
-        # a few recent lines are stuck on backorder (supplier delays)
+        # Small share of recent lines on backorder (supplier delays)
         stuck_backorder = d > END - timedelta(days=75) and random.random() < 0.03
         if ship > END or stuck_backorder:
             status, shipped, ship_s, deliv_s = "Open", 0, "", ""
         elif delivery > END:
             status, deliv_s = "Shipped", ""
 
-        # Price can drift slightly by contract
+        # Contract pricing varies slightly by line
         line_price = round(price * random.uniform(0.92, 1.03), 2)
 
         order_lines.append((
@@ -164,7 +164,7 @@ while line_id <= N_ORDER_LINES:
         ))
         line_id += 1
 
-# Put lines in date order and renumber, like a real order system would
+# Sort lines by date and renumber order IDs
 order_lines.sort(key=lambda r: (r[2], r[1], r[0]))
 order_renumber = {}
 renumbered = []

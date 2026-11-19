@@ -3,11 +3,10 @@ Question: Is delivery performance (OTIF) improving or slipping week to week?
 - Network-wide OTIF per promised week
 - 4-week rolling OTIF (smooths out noisy weeks)
 - Week-over-week change using LAG()
-Why: A single week's OTIF is noisy. The rolling trend and the WoW change
-show whether a dip is a blip or the start of a real problem.
+Weekly OTIF is noisy; the rolling rate shows the underlying trend.
 
 Note: the rolling rate is computed from rolling SUMS of lines, not by
-averaging weekly percentages, so busy weeks carry their real weight.
+averaging weekly percentages, so busier weeks carry more weight.
 */
 
 USE supply_chain;

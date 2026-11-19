@@ -3,8 +3,6 @@ Question: How old is the current backlog, and how much of it is past due?
 - Open (unshipped) order lines as of the last day of data
 - Bucketed by days since order with CASE
 - Value and share of total per bucket
-Why: A backlog full of new orders is normal. A backlog full of 30+ day old
-orders means stuck orders and unhappy customers, and needs escalation.
 */
 
 USE supply_chain;

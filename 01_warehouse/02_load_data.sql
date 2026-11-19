@@ -10,7 +10,7 @@
 USE supply_chain;
 
 -- ---------------------------------------------------------------------
--- 2a. Staging tables (all text, nothing lost on load)
+-- 2a. Staging tables (all text)
 -- ---------------------------------------------------------------------
 DROP TABLE IF EXISTS stg_products, stg_customers, stg_warehouses,
                      stg_order_lines, stg_inventory_snapshots;

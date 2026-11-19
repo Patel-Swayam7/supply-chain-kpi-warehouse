@@ -1,17 +1,16 @@
 -- =====================================================================
 -- Step 3: Reusable KPI views
--- Run after Step 2. Analysts, the Excel report, and dashboards all read
--- from these views, so every KPI is defined in exactly one place.
+-- Run after Step 2. The analysis queries and the Excel report read from
+-- these views, so each KPI is defined in one place.
 --
---   vw_order_line_status        base view: one row per line with real dates + KPI flags
+--   vw_order_line_status        base view: one row per line with dates and KPI flags
 --   vw_otif_weekly              On Time In Full, by promised week and warehouse
 --   vw_fill_rate_weekly         unit and line fill rate, by promised week and warehouse
 --   vw_backlog_weekly           unshipped open orders at each week end, by warehouse
 --   vw_inventory_turns_monthly  inventory turns and days of supply, by month and warehouse
 --
--- Views store COUNTS and SUMS (additive) next to the ratios, so results can
--- be rolled up correctly: total OTIF = SUM(lines_otif) / SUM(lines_due),
--- never an average of weekly percentages.
+-- Views store counts and sums next to the ratios so they can be rolled up:
+-- total OTIF = SUM(lines_otif) / SUM(lines_due), not an average of weekly rates.
 -- =====================================================================
 
 USE supply_chain;

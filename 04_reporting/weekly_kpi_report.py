@@ -11,8 +11,8 @@ and writes a formatted, multi-tab Excel workbook with a trend chart:
   Backlog Aging        open orders by age (03_analysis/04_backlog_aging.sql)
   Inventory Turns      last 6 months of turns by DC
 
-The analysis tabs run the exact SQL files in 03_analysis/, so the report and
-the SQL can never drift apart.
+The analysis tabs run the SQL files in 03_analysis/ directly, so the report
+uses the same logic as the queries.
 
 Usage (from the project root, after building the warehouse):
     python3 04_reporting/weekly_kpi_report.py

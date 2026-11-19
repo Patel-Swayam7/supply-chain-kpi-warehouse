@@ -4,8 +4,6 @@ one getting better or worse?
 - Last 13 weeks vs the 13 weeks before, per warehouse
 - OTIF and unit fill rate, ranked with RANK()
 - Inventory turns for the last 3 months
-Why: Network averages hide where the problem is. A scorecard points the
-operations team at the specific DC to fix.
 */
 
 USE supply_chain;
